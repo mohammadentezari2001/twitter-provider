@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker --version)",
+      "Bash(docker compose *)",
+      "Read(//usr/lib/**)",
+      "Bash(python3 -c \"import aiogram, pydantic, sqlalchemy; print\\('deps ok', aiogram.__version__, pydantic.VERSION\\)\")"
+    ]
+  }
+}

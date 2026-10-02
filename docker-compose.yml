@@ -1,0 +1,125 @@
+# tweet-relay-bot — single-VPS deployment.
+#
+# There are no published ports, and that is the whole point: the bot uses long
+# polling, so it *dials out* to api.telegram.org rather than receiving inbound
+# connections. No domain, no TLS certificate, no reverse proxy, and nothing new
+# to expose in the firewall. The host only needs outbound HTTPS.
+#
+# Bring it up with:  docker compose up -d --build
+
+name: tweet-relay
+
+# Shared service definition. `depends_on` is deliberately NOT in here: `migrate`
+# uses this anchor too, and a `depends_on: migrate` inside it would be
+# self-referential.
+x-app: &app
+  build:
+    context: .
+  image: tweet-relay-bot:1.0.0
+  env_file:
+    - .env
+  restart: unless-stopped
+  init: true
+  # Give an in-flight publish time to finish before SIGKILL. The worker checks a
+  # shutdown flag between jobs, so this is a ceiling, not a usual wait.
+  stop_grace_period: 30s
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+  # Shared so both long-running services write into one place: a single log
+  # stream to read, and one heartbeat plus one media scratch area. `migrate`
+  # inherits these too, which is harmless — it writes none of them.
+  volumes:
+    - app-logs:/app/logs
+    - app-tmp:/app/tmp/media
+    - app-run:/app/run
+
+services:
+
+  # ------------------------------------------------------------------ storage
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-tweetrelay}
+      POSTGRES_USER: ${POSTGRES_USER:-tweetrelay}
+      # `:?` aborts the whole `up` with this message rather than starting a
+      # database with a default password.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      # Deterministic collation, so index ordering does not depend on the host
+      # locale and behaviour is identical on every VPS.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U ${POSTGRES_USER:-tweetrelay} -d ${POSTGRES_DB:-tweetrelay}
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    # Uncomment to reach the database from the host (e.g. psql, pg_dump).
+    # ports:
+    #   - "127.0.0.1:5432:5432"
+
+  # Redis used to sit here. It was removed deliberately: nothing in this build
+  # ever connected to it. Every piece of durable state — the job queue, the tweet
+  # cache, the publish cooldown, the pending previews — lives in PostgreSQL, so
+  # the container was pure overhead (a second image to pull, ~40 MB of RAM, and
+  # a health gate that could fail the deploy for no reason). `REDIS_URL` is still
+  # accepted and validated for forward compatibility; leaving it empty is correct.
+
+  # --------------------------------------------------------------- one-shot
+  # Runs `alembic upgrade head` and exits. Both long-running services wait for
+  # it to complete, so two containers can never race to migrate the same
+  # database — and a failed migration stops the deploy instead of leaving the
+  # app running against a schema it does not understand.
+  migrate:
+    <<: *app
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ------------------------------------------------------------------- app
+  # Same image, same code; RUN_MODE decides which half of the application
+  # starts. Keeping them as separate containers means a crash-looping handler
+  # cannot stop the queue from draining, and vice versa.
+  bot:
+    <<: *app
+    command: ["python", "-m", "app.main"]
+    environment:
+      RUN_MODE: bot
+      # Per-service heartbeat. Both containers share the `app-run` volume, so a
+      # single shared file would let a live bot keep the worker's healthcheck
+      # green while the worker was wedged — the exact failure the heartbeat
+      # exists to catch. The healthcheck runs inside the same container and
+      # inherits this variable, so it reads the matching file.
+      HEARTBEAT_FILE: /app/run/heartbeat-bot
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "app.main"]
+    environment:
+      RUN_MODE: worker
+      HEARTBEAT_FILE: /app/run/heartbeat-worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-data:
+  app-logs:
+  app-tmp:
+  app-run:

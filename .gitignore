@@ -1,0 +1,35 @@
+# Secrets - never commit
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.eggs/
+build/
+dist/
+
+# Tests / tooling
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Runtime artifacts
+logs/
+*.log
+tmp/
+media_tmp/
+run/
+deploy/backups/*
+!deploy/backups/.gitkeep
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
